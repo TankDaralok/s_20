@@ -17,12 +17,13 @@ class OverlayAccessibilityService : AccessibilityService() {
         @Volatile private var allowedUntil: Long = 0L
         private const val GRACE_PERIOD_MS = 90_000L // 90 mp nyugalmi idő
 
-        // ÚJ: Spam szűrő változó
-        @Volatile private var lastInterceptTime = 0L 
+        // TÖKÉLETES SPAM SZŰRŐ: Megakadályozza a végtelen ciklust
+        @Volatile var isIntercepting: Boolean = false
 
         fun allowTemporarily(packageName: String) {
             allowedPackage = packageName
             allowedUntil = System.currentTimeMillis() + GRACE_PERIOD_MS
+            isIntercepting = false // Reseteljük a zárat
             Log.d("DoomBreaker", "⏳ Ideiglenes engedély: $packageName")
         }
 
@@ -46,20 +47,19 @@ class OverlayAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
 
         if (blockedApps.contains(packageName)) {
+            // Ha még tart a 90 másodperces engedély, hagyjuk békén
             if (isCurrentlyAllowed(packageName)) {
                 return
             }
 
-            // --- SPAM VÉDELEM (DEBOUNCE) ---
-            // Megakadályozza az ANR crash-t, amit a TikTok agresszív ablaknyitásai okoznak.
-            val now = System.currentTimeMillis()
-            if (now - lastInterceptTime < 2000L) { // 2 másodperc cooldown
-                return 
+            // VÉGTELEN CIKLUS VÉDELEM: Ha már folyamatban van egy blokkolás, 
+            // ignorálunk minden más eseményt, amit a TikTok spammel!
+            if (isIntercepting) {
+                return
             }
-            lastInterceptTime = now
-            // ---------------------------------
 
             Log.d("DoomBreaker", "🚨 BUMM! Tiltólistás app észlelve: $packageName")
+            isIntercepting = true // Zárjuk a kaput!
             showWaitingScreen(packageName)
         }
     }
@@ -70,7 +70,6 @@ class OverlayAccessibilityService : AccessibilityService() {
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            // ÚJ BIZTONSÁGI FLAG: Ne indítsa újra a Fluttert, ha már fut!
             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP) 
             putExtra("BLOCKED_APP", blockedPackage)
         }
@@ -79,6 +78,7 @@ class OverlayAccessibilityService : AccessibilityService() {
             startActivity(intent)
         } catch (e: Exception) {
             Log.e("DoomBreaker", "Nem sikerült elindítani a MainActivity-t: ${e.message}")
+            isIntercepting = false // Hiba esetén oldjuk a zárat
         }
     }
 
@@ -124,6 +124,7 @@ class OverlayAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         removeExemptionOverlay()
+        isIntercepting = false
     }
 
     override fun onServiceConnected() {
@@ -134,5 +135,6 @@ class OverlayAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         removeExemptionOverlay()
+        isIntercepting = false
     }
 }

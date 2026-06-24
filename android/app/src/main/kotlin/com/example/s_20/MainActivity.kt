@@ -13,27 +13,24 @@ class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.doombreaker.app/bridge"
     private var methodChannel: MethodChannel? = null
 
-    // A getCachedEngineId() OVERRIDE TÖRÖLVE LETT! 
-    // Visszatérünk a normál Flutter bootoláshoz.
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
 
-        // Figyeljük, mit kér a Flutter (pl. gombnyomások a WaitingScreen-en)
         methodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "proceedToApp" -> {
                     val pkg = call.arguments as? String
                     if (pkg != null) {
                         OverlayAccessibilityService.allowTemporarily(pkg)
+                    } else {
+                        OverlayAccessibilityService.isIntercepting = false
                     }
-                    // Letesszük a mi appunkat a háttérbe, hogy a user lássa a TikTokot
                     moveTaskToBack(true)
                     result.success(null)
                 }
                 "dismissOverlay" -> {
-                    // Visszadobjuk a usert a telefon főképernyőjére (Home)
+                    OverlayAccessibilityService.isIntercepting = false
                     val homeIntent = Intent(Intent.ACTION_MAIN)
                     homeIntent.addCategory(Intent.CATEGORY_HOME)
                     homeIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -41,7 +38,6 @@ class MainActivity: FlutterActivity() {
                     result.success(null)
                 }
                 "checkInitialIntent" -> {
-                    // Amikor a Flutter elindul, megkérdezi, hogy tiltott app miatt indult-e
                     handleIntentExtra(intent)
                     result.success(null)
                 }
@@ -82,6 +78,13 @@ class MainActivity: FlutterActivity() {
             methodChannel?.invokeMethod("showWaitingScreen", blockedApp)
             intent.removeExtra("BLOCKED_APP")
         }
+    }
+
+    // Ha a felhasználó lenyomja a Home gombot, vagy átvált más appra az Android 
+    // feladatkezelőjéből, oldanunk kell az "isIntercepting" zárat, hogy a Kém újra élesedjen!
+    override fun onStop() {
+        super.onStop()
+        OverlayAccessibilityService.isIntercepting = false
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
