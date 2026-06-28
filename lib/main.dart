@@ -2,6 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'waiting_screen.dart';
 
+// GLOBÁLIS ÁLLAPOTOK
+int globalFrictionTime = 20;
+Map<String, bool> globalBlockedApps = {
+  'TikTok': true,
+  'Instagram': true,
+  'Facebook': true,
+  'X (Twitter)': false,
+  'YouTube': false,
+};
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([
@@ -11,23 +21,138 @@ void main() async {
   runApp(const DoomBreakerApp());
 }
 
-class DoomBreakerApp extends StatelessWidget {
+// 1. FŐ ALKALMAZÁS - EZ KEZELI A BLOKKOLÓ KÉPERNYŐT ÉS A KILÉPÉST
+class DoomBreakerApp extends StatefulWidget {
   const DoomBreakerApp({super.key});
+
+  @override
+  State<DoomBreakerApp> createState() => _DoomBreakerAppState();
+}
+
+class _DoomBreakerAppState extends State<DoomBreakerApp> with WidgetsBindingObserver {
+  static const platform = MethodChannel('com.doombreaker.app/bridge');
+  
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  String? _blockedAppPackage;
+  Duration _weeklyTimeSpent = Duration.zero;
+  
+  // ÚJ: Ez felel a villanásmentes, sötét kilépő-képernyőért
+  bool _isExiting = false; 
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    platform.setMethodCallHandler((call) async {
+      if (call.method == 'showWaitingScreen') {
+        final pkg = call.arguments as String;
+        
+        String displayName = _getAppDisplayName(pkg);
+        if (globalBlockedApps.containsKey(displayName) && globalBlockedApps[displayName] == false) {
+           await platform.invokeMethod('proceedToApp', pkg);
+           return;
+        }
+
+        final num usageMs = await platform.invokeMethod('getWeeklyUsage', {'package': pkg}) ?? 0;
+        
+        setState(() {
+          _blockedAppPackage = pkg;
+          _isExiting = false; // Ha újra jön a blokkolás, levesszük a sötétítőt
+          _weeklyTimeSpent = Duration(milliseconds: usageMs.toInt());
+        });
+      }
+    });
+
+    _checkInitialIntent();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      // Csak miután az app leért a padlóra, csinálunk nagytakarítást
+      if (_blockedAppPackage != null || _isExiting) {
+        setState(() {
+          _blockedAppPackage = null;
+          _isExiting = false;
+        });
+        // Visszaállítjuk a navigációt a tiszta Dashboardra a háttérben
+        _navigatorKey.currentState?.popUntil((route) => route.isFirst);
+      }
+    }
+  }
+
+  Future<void> _checkInitialIntent() async {
+    try {
+      await platform.invokeMethod('checkInitialIntent');
+    } on PlatformException catch (e) {
+      debugPrint("Hiba a hídnál: ${e.message}");
+    }
+  }
+
+  String _getAppDisplayName(String packageName) {
+    if (packageName.contains('instagram')) return 'Instagram';
+    if (packageName.contains('musically')) return 'TikTok';
+    if (packageName.contains('facebook')) return 'Facebook';
+    if (packageName.contains('twitter')) return 'X (Twitter)';
+    if (packageName.contains('youtube')) return 'YouTube';
+    return packageName;
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _navigatorKey, 
       title: 'S-20',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF11131A),
       ),
+      builder: (context, child) {
+        return Stack(
+          children: [
+            child!, 
+            
+            // Ha épp lépünk ki az appból, azonnal eltüntetjük a visszaszámlálót és a beállításokat 
+            // egy sima fekete háttérrel, így az Android ezt fotózza le (NINCS VILLANÁS)
+            if (_isExiting)
+              Positioned.fill(
+                child: Container(color: const Color(0xFF11131A)),
+              )
+            // Egyébként mutatjuk a számlálót
+            else if (_blockedAppPackage != null)
+              Positioned.fill(
+                child: WaitingScreen(
+                  appDisplayName: _getAppDisplayName(_blockedAppPackage!),
+                  weeklyTimeSpent: _weeklyTimeSpent,
+                  onProceed: () async {
+                    final pkg = _blockedAppPackage;
+                    setState(() => _isExiting = true); // Fekete képernyő aktiválása
+                    await platform.invokeMethod('proceedToApp', pkg);
+                  },
+                  onStayFocused: () async {
+                    setState(() => _isExiting = true); // Fekete képernyő aktiválása
+                    await platform.invokeMethod('dismissOverlay');
+                  },
+                ),
+              ),
+          ],
+        );
+      },
       home: const MainGate(),
     );
   }
 }
 
+// 2. ENGEDÉLYEK ÉS ALAP NAVIGÁCIÓ KEZELÉSE
 class MainGate extends StatefulWidget {
   const MainGate({super.key});
 
@@ -38,9 +163,6 @@ class MainGate extends StatefulWidget {
 class _MainGateState extends State<MainGate> with WidgetsBindingObserver {
   static const platform = MethodChannel('com.doombreaker.app/bridge');
 
-  String? _blockedAppPackage;
-  Duration _weeklyTimeSpent = Duration.zero; // ÚJ: Itt tároljuk a valós időt
-
   bool? _hasOverlayPermission; 
   bool? _hasAccessibilityPermission;
 
@@ -48,21 +170,6 @@ class _MainGateState extends State<MainGate> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
-    platform.setMethodCallHandler((call) async {
-      if (call.method == 'showWaitingScreen') {
-        final pkg = call.arguments as String;
-        // ÚJ: Lekérdezzük a TÉNYLEGES heti használati időt az Androidtól
-        final num usageMs = await platform.invokeMethod('getWeeklyUsage', {'package': pkg}) ?? 0;
-        
-        setState(() {
-          _blockedAppPackage = pkg;
-          _weeklyTimeSpent = Duration(milliseconds: usageMs.toInt());
-        });
-      }
-    });
-
-    _checkInitialIntent();
     _refreshPermissionStatus();
   }
 
@@ -76,10 +183,6 @@ class _MainGateState extends State<MainGate> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshPermissionStatus();
-    } else if (state == AppLifecycleState.paused) {
-      setState(() {
-        _blockedAppPackage = null;
-      });
     }
   }
 
@@ -97,42 +200,10 @@ class _MainGateState extends State<MainGate> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _checkInitialIntent() async {
-    try {
-      await platform.invokeMethod('checkInitialIntent');
-    } on PlatformException catch (e) {
-      debugPrint("Hiba a hídnál: ${e.message}");
-    }
-  }
-
-  String _getAppDisplayName(String packageName) {
-    if (packageName.contains('instagram')) return 'Instagram';
-    if (packageName.contains('musically')) return 'TikTok';
-    if (packageName.contains('facebook')) return 'Facebook';
-    return packageName;
-  }
-
-  bool get _isFullySetUp =>
-      _hasOverlayPermission == true && _hasAccessibilityPermission == true;
+  bool get _isFullySetUp => _hasOverlayPermission == true && _hasAccessibilityPermission == true;
 
   @override
   Widget build(BuildContext context) {
-    if (_blockedAppPackage != null) {
-      return WaitingScreen(
-        appDisplayName: _getAppDisplayName(_blockedAppPackage!),
-        weeklyTimeSpent: _weeklyTimeSpent, // ÚJ: Valós adat bekötve
-        onProceed: () async {
-          final pkg = _blockedAppPackage;
-          setState(() => _blockedAppPackage = null);
-          await platform.invokeMethod('proceedToApp', pkg);
-        },
-        onStayFocused: () async {
-          setState(() => _blockedAppPackage = null);
-          await platform.invokeMethod('dismissOverlay');
-        },
-      );
-    }
-
     if (_hasOverlayPermission == null || _hasAccessibilityPermission == null) {
       return const Scaffold(
         body: Center(child: CircularProgressIndicator(color: Color(0xFF8FE3C0))),
@@ -147,19 +218,23 @@ class _MainGateState extends State<MainGate> with WidgetsBindingObserver {
       hasOverlayPermission: _hasOverlayPermission!,
       hasAccessibilityPermission: _hasAccessibilityPermission!,
       onRequestOverlay: () => platform.invokeMethod('requestOverlayPermission'),
-      onOpenAccessibilitySettings: () =>
-          platform.invokeMethod('openAccessibilitySettings'),
+      onOpenAccessibilitySettings: () => platform.invokeMethod('openAccessibilitySettings'),
       onRefresh: _refreshPermissionStatus,
     );
   }
 }
 
 // =========================================================================
-// MŰKÖDŐ DASHBOARD (IRÁNYÍTÓPULT)
+// DASHBOARD (IRÁNYÍTÓPULT)
 // =========================================================================
-class DashboardScreen extends StatelessWidget {
+class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -167,151 +242,72 @@ class DashboardScreen extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text(
-          'S-20',
-          style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 2.0),
-        ),
+        title: const Text('S-20', style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 2.0)),
         centerTitle: true,
       ),
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         children: [
-          // BIZTONSÁGI PAJZS KÁRTYA
           Container(
             padding: const EdgeInsets.all(28),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF1B212D), Color(0xFF13161F)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+              gradient: const LinearGradient(colors: [Color(0xFF1B212D), Color(0xFF13161F)], begin: Alignment.topLeft, end: Alignment.bottomRight),
               borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: const Color(0xFF8FE3C0).withAlpha(50),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF8FE3C0).withAlpha(15),
-                  blurRadius: 30,
-                  spreadRadius: -5,
-                  offset: const Offset(0, 10),
-                ),
-              ],
+              border: Border.all(color: const Color(0xFF8FE3C0).withAlpha(50), width: 1),
+              boxShadow: [BoxShadow(color: const Color(0xFF8FE3C0).withAlpha(15), blurRadius: 30, spreadRadius: -5, offset: const Offset(0, 10))],
             ),
             child: Column(
               children: [
                 Container(
                   padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF8FE3C0).withAlpha(26),
-                    shape: BoxShape.circle,
-                  ),
+                  decoration: BoxDecoration(color: const Color(0xFF8FE3C0).withAlpha(26), shape: BoxShape.circle),
                   child: const Icon(Icons.shield_rounded, color: Color(0xFF8FE3C0), size: 48),
                 ),
                 const SizedBox(height: 20),
-                const Text(
-                  'Védelem Aktív',
-                  style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
-                ),
+                const Text('Védelem Aktív', style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                Text(
-                  'A háttérben figyeljük a megadott alkalmazásokat. Nincs több végtelen pörgetés!',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white.withAlpha(150), fontSize: 14, height: 1.4),
-                ),
+                Text('A háttérben figyeljük a megadott alkalmazásokat. Nincs több végtelen pörgetés!', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withAlpha(150), fontSize: 14, height: 1.4)),
               ],
             ),
           ),
           const SizedBox(height: 36),
 
-          // BEÁLLÍTÁSOK SZEKCIÓ
           _buildSectionHeader('BEÁLLÍTÁSOK'),
           _buildMenuItem(
             icon: Icons.apps_rounded,
             title: 'Blokkolt alkalmazások',
             subtitle: 'Kezeld a figyelőlistát',
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const _BlockedAppsScreen()),
-              );
+            onTap: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (context) => const _BlockedAppsScreen()));
+              if (mounted) setState(() {}); 
             },
           ),
           _buildMenuItem(
             icon: Icons.timer_rounded,
             title: 'Friction idő',
-            subtitle: '20 másodperc (Alapértelmezett)',
-            onTap: () => _showTimePicker(context),
+            subtitle: '$globalFrictionTime másodperc beállítva',
+            onTap: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (context) => const _FrictionTimeScreen()));
+              if (mounted) setState(() {}); 
+            },
           ),
 
           const SizedBox(height: 28),
 
-          // TÁMOGATÁS SZEKCIÓ
           _buildSectionHeader('INFORMÁCIÓ & TÁMOGATÁS'),
           _buildMenuItem(
             icon: Icons.help_outline_rounded,
             title: 'Gyakori Kérdések (FAQ)',
             subtitle: 'Hogyan működik az S-20?',
-            onTap: () => _showInfoDialog(context, 'Gyakori Kérdések', 'Itt fognak megjelenni a leggyakrabban ismételt kérdések. A 20 másodperces szabály tudományosan bizonyítottan megszakítja a dopamin-hurkot.'),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const _FaqScreen())),
           ),
           _buildMenuItem(
             icon: Icons.info_outline_rounded,
             title: 'Rólunk',
             subtitle: 'A projekt története',
-            onTap: () => _showInfoDialog(context, 'Rólunk', 'Az S-20 (korábban Doom Breaker) célja, hogy visszaadja az irányítást az időd és a figyelmed felett.'),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const _AboutUsScreen())),
           ),
           const SizedBox(height: 20),
-        ],
-      ),
-    );
-  }
-
-  void _showTimePicker(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1B212D),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('Friction idő beállítása', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 20),
-            ListTile(
-              title: const Text('20 másodperc', style: TextStyle(color: Colors.white)),
-              trailing: const Icon(Icons.check_circle, color: Color(0xFF8FE3C0)),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
-              title: const Text('30 másodperc', style: TextStyle(color: Colors.white70)),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
-              title: const Text('60 másodperc', style: TextStyle(color: Colors.white70)),
-              onTap: () => Navigator.pop(context),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showInfoDialog(BuildContext context, String title, String content) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1B212D),
-        title: Text(title, style: const TextStyle(color: Colors.white)),
-        content: Text(content, style: const TextStyle(color: Colors.white70, height: 1.5)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Bezárás', style: TextStyle(color: Color(0xFF8FE3C0))),
-          ),
         ],
       ),
     );
@@ -320,46 +316,19 @@ class DashboardScreen extends StatelessWidget {
   Widget _buildSectionHeader(String title) {
     return Padding(
       padding: const EdgeInsets.only(left: 12, bottom: 12),
-      child: Text(
-        title,
-        style: TextStyle(
-          color: Colors.white.withAlpha(100),
-          fontSize: 12,
-          fontWeight: FontWeight.bold,
-          letterSpacing: 1.2,
-        ),
-      ),
+      child: Text(title, style: TextStyle(color: Colors.white.withAlpha(100), fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
     );
   }
 
-  Widget _buildMenuItem({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required VoidCallback onTap,
-  }) {
+  Widget _buildMenuItem({required IconData icon, required String title, required String subtitle, required VoidCallback onTap}) {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withAlpha(8),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withAlpha(15)),
-      ),
+      decoration: BoxDecoration(color: Colors.white.withAlpha(8), borderRadius: BorderRadius.circular(18), border: Border.all(color: Colors.white.withAlpha(15))),
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: const Color(0xFF8FE3C0).withAlpha(26),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Icon(icon, color: const Color(0xFF8FE3C0), size: 24),
-        ),
+        leading: Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: const Color(0xFF8FE3C0).withAlpha(26), borderRadius: BorderRadius.circular(14)), child: Icon(icon, color: const Color(0xFF8FE3C0), size: 24)),
         title: Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 15)),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text(subtitle, style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 13)),
-        ),
+        subtitle: Padding(padding: const EdgeInsets.only(top: 4), child: Text(subtitle, style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 13))),
         trailing: Icon(Icons.arrow_forward_ios_rounded, color: Colors.white.withAlpha(50), size: 16),
         onTap: onTap,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
@@ -369,11 +338,15 @@ class DashboardScreen extends StatelessWidget {
 }
 
 // =========================================================================
-// ÚJ: BLOKKOLT ALKALMAZÁSOK KÉPERNYŐ
+// ALOLDAL: BLOKKOLT ALKALMAZÁSOK
 // =========================================================================
-class _BlockedAppsScreen extends StatelessWidget {
+class _BlockedAppsScreen extends StatefulWidget {
   const _BlockedAppsScreen();
+  @override
+  State<_BlockedAppsScreen> createState() => _BlockedAppsScreenState();
+}
 
+class _BlockedAppsScreenState extends State<_BlockedAppsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -386,35 +359,27 @@ class _BlockedAppsScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          const Text(
-            'Ezeknél az alkalmazásoknál fog megjelenni a 20 másodperces visszaszámláló megnyitáskor.',
-            style: TextStyle(color: Colors.white60, height: 1.5),
-          ),
+          const Text('Ezeknél az alkalmazásoknál fog megjelenni a visszaszámláló megnyitáskor.', style: TextStyle(color: Colors.white60, height: 1.5)),
           const SizedBox(height: 24),
-          _buildAppSwitch('TikTok', true),
-          _buildAppSwitch('Instagram', true),
-          _buildAppSwitch('Facebook', true),
-          _buildAppSwitch('X (Twitter)', false),
-          _buildAppSwitch('YouTube', false),
+          ...globalBlockedApps.keys.map((appName) => _buildAppSwitch(appName)),
         ],
       ),
     );
   }
 
-  Widget _buildAppSwitch(String name, bool isActive) {
+  Widget _buildAppSwitch(String name) {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withAlpha(8),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withAlpha(15)),
-      ),
+      decoration: BoxDecoration(color: Colors.white.withAlpha(8), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withAlpha(15))),
       child: SwitchListTile(
         title: Text(name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500)),
-        value: isActive,
-        activeColor: const Color(0xFF8FE3C0),
+        value: globalBlockedApps[name]!,
+        activeTrackColor: const Color(0xFF8FE3C0).withAlpha(100),
+        activeThumbColor: const Color(0xFF8FE3C0),
         onChanged: (bool value) {
-          // TODO: Valós adatbázis mentés a jövőben
+          setState(() {
+            globalBlockedApps[name] = value;
+          });
         },
       ),
     );
@@ -422,7 +387,172 @@ class _BlockedAppsScreen extends StatelessWidget {
 }
 
 // =========================================================================
-// ENGEDÉLYEK KÉPERNYŐ (EZ VÁLTOZATLAN)
+// ALOLDAL: FRICTION IDŐ
+// =========================================================================
+class _FrictionTimeScreen extends StatefulWidget {
+  const _FrictionTimeScreen();
+  @override
+  State<_FrictionTimeScreen> createState() => _FrictionTimeScreenState();
+}
+
+class _FrictionTimeScreenState extends State<_FrictionTimeScreen> {
+  late double _sliderValue;
+
+  @override
+  void initState() {
+    super.initState();
+    _sliderValue = globalFrictionTime.toDouble();
+  }
+
+  void _updateTime(int time) {
+    setState(() {
+      globalFrictionTime = time;
+      _sliderValue = time.toDouble();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF11131A),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text('Friction idő', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          const Text('Válaszd ki, hány másodpercet szeretnél várni egy blokkolt app megnyitásakor.', style: TextStyle(color: Colors.white60, height: 1.5)),
+          const SizedBox(height: 24),
+          _buildPresetOption(20, '20 másodperc (Könnyű)'),
+          _buildPresetOption(30, '30 másodperc (Közepes)'),
+          _buildPresetOption(50, '50 másodperc (Nehéz)'),
+          const SizedBox(height: 30),
+          Text('Egyéni idő: ${globalFrictionTime} mp', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          Slider(
+            value: _sliderValue,
+            min: 1,
+            max: 100,
+            divisions: 99,
+            activeColor: const Color(0xFF8FE3C0),
+            inactiveColor: Colors.white24,
+            label: _sliderValue.toInt().toString(),
+            onChanged: (value) {
+              setState(() {
+                _sliderValue = value;
+                globalFrictionTime = value.toInt();
+              });
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPresetOption(int time, String title) {
+    final isSelected = globalFrictionTime == time;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(color: Colors.white.withAlpha(8), borderRadius: BorderRadius.circular(16), border: Border.all(color: isSelected ? const Color(0xFF8FE3C0) : Colors.white.withAlpha(15))),
+      child: RadioListTile<int>(
+        title: Text(title, style: TextStyle(color: isSelected ? Colors.white : Colors.white70, fontWeight: FontWeight.w500)),
+        value: time,
+        groupValue: globalFrictionTime,
+        activeColor: const Color(0xFF8FE3C0),
+        onChanged: (val) => _updateTime(val!),
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// ALOLDAL: GYAKORI KÉRDÉSEK (FAQ)
+// =========================================================================
+class _FaqScreen extends StatelessWidget {
+  const _FaqScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF11131A),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text('Gyakori Kérdések', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          _buildFaqItem('Miért pont ennyi másodperc?', 'Az emberi agy dopaminkereső ciklusa egy mesterséges várakozási idővel könnyen megszakítható. Egy rövid fék is tudatossá teszi a reflexszerű döntést, így a megnyitások nagy része elmarad.'),
+          _buildFaqItem('Lassítja a telefonom az app?', 'Egyáltalán nem. Az S-20 natív Android folyamatként, rendkívül alacsony erőforrás- és akkumulátorhasználattal dolgozik a háttérben.'),
+          _buildFaqItem('Miért kér Accessibility engedélyt?', 'A modern Android rendszereken ez a legbiztonságosabb és legenergiatakarékosabb módja annak, hogy az applikáció észlelje a tiltólistás alkalmazások indítását anélkül, hogy a képernyőt folyamatosan szkennelné.'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFaqItem(String question, String answer) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(color: Colors.white.withAlpha(8), borderRadius: BorderRadius.circular(16)),
+      child: ExpansionTile(
+        iconColor: const Color(0xFF8FE3C0),
+        collapsedIconColor: Colors.white54,
+        title: Text(question, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
+            child: Text(answer, style: const TextStyle(color: Colors.white60, height: 1.5)),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// ALOLDAL: RÓLUNK
+// =========================================================================
+class _AboutUsScreen extends StatelessWidget {
+  const _AboutUsScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF11131A),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text('Rólunk', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
+      ),
+      body: const Padding(
+        padding: EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('S-20: Vissza a jelenbe', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+            SizedBox(height: 16),
+            Text(
+              'A közösségi média platformok algoritmusai arra lettek tervezve, hogy minél tovább a képernyő előtt tartsanak minket. Az S-20 azért született meg, hogy pajzsként álljon közéd és az algoritmikus doomscrolling közé.\n\n'
+              'Nem tiltjuk le az alkalmazásaidat véglegesen, csupán egy kis súrlódást (friction) teszünk a megnyitási folyamatba, ami lehetőséget ad rá, hogy tudatosan dönts: valóban erre akarod-e szánni a figyelmedet és az idődet.',
+              style: TextStyle(color: Colors.white60, fontSize: 15, height: 1.6),
+            ),
+            Spacer(),
+            Center(
+              child: Text('Verzió: 1.0.0 (MVP)', style: TextStyle(color: Colors.white24, fontWeight: FontWeight.w500)),
+            ),
+            SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// ENGEDÉLYEK KÉPERNYŐ (Módosítás nélkül)
 // =========================================================================
 class _PermissionSetupScreen extends StatelessWidget {
   final bool hasOverlayPermission;
@@ -451,7 +581,7 @@ class _PermissionSetupScreen extends StatelessWidget {
               const SizedBox(height: 16),
               const Text('Két lépés van hátra', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
-              const Text('Ezeket Android nem engedi automatikusan kérni — mindkettőt neked kell bekapcsolnod a Beállításokban.', style: TextStyle(color: Colors.white60, fontSize: 14, height: 1.4)),
+              const Text('Ezeket az Android biztonsági okokból nem engedi automatikusan jóváhagyni — mindkettőt neked kell bekapcsolnod a Beállításokban.', style: TextStyle(color: Colors.white60, fontSize: 14, height: 1.4)),
               const SizedBox(height: 28),
               _PermissionRow(
                 granted: hasAccessibilityPermission,
@@ -464,7 +594,7 @@ class _PermissionSetupScreen extends StatelessWidget {
               _PermissionRow(
                 granted: hasOverlayPermission,
                 title: 'Más alkalmazások felett megjelenés',
-                description: 'Ez kell ahhoz, hogy a várakozó képernyő tényleg előtérbe ugorjon.',
+                description: 'Ez kell ahhoz, hogy a várakozó képernyő tényleg előtérbe ugorjon a tiltott alkalmazás tetejére.',
                 buttonLabel: 'Engedély kérése',
                 onPressed: onRequestOverlay,
               ),

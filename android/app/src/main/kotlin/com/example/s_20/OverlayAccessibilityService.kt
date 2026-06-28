@@ -14,65 +14,48 @@ class OverlayAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile private var allowedPackage: String? = null
+        @Volatile private var allowedUntil: Long = 0L
+        private const val GRACE_PERIOD_MS = 90_000L // 90 mp nyugalmi idő
+
         @Volatile var isIntercepting: Boolean = false
 
         fun allowTemporarily(packageName: String) {
             allowedPackage = packageName
-            isIntercepting = false // Reseteljük a zárat
-            Log.d("DoomBreaker", "⏳ Munkamenet engedélyezve: $packageName")
+            allowedUntil = System.currentTimeMillis() + GRACE_PERIOD_MS
+            isIntercepting = false
+            Log.d("DoomBreaker", "⏳ Ideiglenes engedély: $packageName")
+        }
+
+        private fun isCurrentlyAllowed(packageName: String): Boolean {
+            return packageName == allowedPackage && System.currentTimeMillis() < allowedUntil
         }
     }
 
-    // BŐVÍTETT KÖZÖSSÉGI MÉDIA LISTA
     private val blockedApps = listOf(
         "com.zhiliaoapp.musically", // TikTok
         "com.instagram.android",    // Instagram
         "com.facebook.katana",      // Facebook
-        "com.snapchat.android",     // Snapchat
         "com.twitter.android",      // X (Twitter)
-        "com.instagram.barcelona",  // Threads
-        "com.reddit.frontpage",     // Reddit
-        "com.google.android.youtube",// YouTube
-        "com.pinterest"             // Pinterest
+        "com.google.android.youtube"// YouTube
     )
 
     private var windowManager: WindowManager? = null
     private var exemptionOverlay: View? = null
-    @Volatile private var lastInterceptTime = 0L
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
 
         val packageName = event.packageName?.toString() ?: return
 
-        // MUNKAMENET TÖRLÉSE (SESSION RESET)
-        // Ha egy olyan app nyílik meg, ami:
-        // 1. Nem a mi appunk (s_20)
-        // 2. Nem rendszerfelület (pl. értesítési sáv, hangerő)
-        // 3. Nem a billentyűzet (inputmethod)
-        if (packageName != "com.example.s_20" &&
-            !packageName.contains("systemui") &&
-            !packageName.contains("inputmethod")) {
-            
-            // Ha volt engedélyezett app, de most valami mást nyitott meg a user:
-            if (allowedPackage != null && packageName != allowedPackage) {
-                Log.d("DoomBreaker", "🚫 App elhagyva ($packageName). Lakat visszazárva!")
-                allowedPackage = null
-            }
-        }
-
-        // BLOKKOLÁSI LOGIKA
+        // A Flutterből át is küldhetjük ezt a listát a jövőben, de egyelőre a UI-ban van szűrve
         if (blockedApps.contains(packageName)) {
-            // Ha épp benne vagyunk az engedélyezett munkamenetben, hagyjuk békén
-            if (packageName == allowedPackage) {
+            if (isCurrentlyAllowed(packageName)) {
                 return
             }
 
-            if (isIntercepting) return
-
-            val now = System.currentTimeMillis()
-            if (now - lastInterceptTime < 2000L) return
-            lastInterceptTime = now
+            if (isIntercepting) {
+                return
+            }
 
             Log.d("DoomBreaker", "🚨 BUMM! Tiltólistás app észlelve: $packageName")
             isIntercepting = true
@@ -94,7 +77,7 @@ class OverlayAccessibilityService : AccessibilityService() {
             startActivity(intent)
         } catch (e: Exception) {
             Log.e("DoomBreaker", "Nem sikerült elindítani a MainActivity-t: ${e.message}")
-            isIntercepting = false 
+            isIntercepting = false
         }
     }
 

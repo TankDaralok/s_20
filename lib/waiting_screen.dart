@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'breathing_circle.dart';
-import 'main.dart'; // <--- EZ A SOR HIÁNYZOTT!
+import 'main.dart'; // Ez olvassa ki a globális időt
 
 class WaitingScreen extends StatefulWidget {
   final String appDisplayName;
@@ -32,7 +32,6 @@ class _WaitingScreenState extends State<WaitingScreen> {
   @override
   void initState() {
     super.initState();
-    // A globális beállításokból olvassuk ki a beállított időt
     _secondsLeft = globalFrictionTime;
     
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -58,7 +57,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
       return "You've already tried to open ${widget.appDisplayName} "
           '$n time${n == 1 ? '' : 's'} this week.';
     }
-    final hours = widget.weeklyTimeSpent.inMinutes / 60;
+    final hours = widget.weeklyTimeSpent.inMinutes / 60.0;
     return "You've already spent ${hours.toStringAsFixed(1)} hours on "
         '${widget.appDisplayName} this week.';
   }
@@ -84,9 +83,9 @@ class _WaitingScreenState extends State<WaitingScreen> {
                   letterSpacing: 2,
                 ),
               ),
-              const Spacer(),
+              const Spacer(), 
               const BreathingCircle(),
-              const Spacer(),
+              const Spacer(), 
               Container(
                 padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
@@ -107,7 +106,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: widget.onStayFocused,
+                  onPressed: widget.onStayFocused, // TISZTA HÍVÁS NAVIGÁCIÓ NÉLKÜL
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF8FE3C0),
                     foregroundColor: const Color(0xFF11131A),
@@ -126,7 +125,7 @@ class _WaitingScreenState extends State<WaitingScreen> {
               SizedBox(
                 width: double.infinity,
                 child: TextButton(
-                  onPressed: _canProceed ? widget.onProceed : null,
+                  onPressed: _canProceed ? widget.onProceed : null, // TISZTA HÍVÁS
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
