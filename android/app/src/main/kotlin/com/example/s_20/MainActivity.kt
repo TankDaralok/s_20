@@ -15,6 +15,9 @@ class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.doombreaker.app/bridge"
     private var methodChannel: MethodChannel? = null
 
+    // Új állapotváltozó, jelzi hogy éppen most lett bezárva a várakozó képernyő
+    private var wasJustDismissed = false
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
@@ -41,7 +44,13 @@ class MainActivity: FlutterActivity() {
                     result.success(null)
                 }
                 "dismissOverlay" -> {
+                    // Ha a felhasználó a "Stay focused" gombot választotta, jelöljük, hogy éppen most zártuk be
                     OverlayAccessibilityService.isIntercepting = false
+                    wasJustDismissed = true
+
+                    // Kisebb UX: toljuk hátra a taskot mielőtt a Home képernyőt indítjuk
+                    moveTaskToBack(true)
+
                     val homeIntent = Intent(Intent.ACTION_MAIN)
                     homeIntent.addCategory(Intent.CATEGORY_HOME)
                     homeIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -80,12 +89,23 @@ class MainActivity: FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIntentExtra(intent)
+        // Csak akkor mutassuk a várakozó képernyőt, ha tényleg blokkolva van az alkalmazás és
+        // nem éppen most zártuk be a várakozó képernyőt a "Stay focused" gombbal.
+        if (intent.hasExtra("BLOCKED_APP")) {
+            // Ha éppen most zártuk be, ne indítsuk újra
+            if (!wasJustDismissed && OverlayAccessibilityService.isIntercepting) {
+                handleIntentExtra(intent)
+            } else {
+                // Töröljük az extra-t, hogy ne hívja meg később véletlenül
+                intent.removeExtra("BLOCKED_APP")
+            }
+        }
     }
 
     private fun handleIntentExtra(intent: Intent) {
         val blockedApp = intent.getStringExtra("BLOCKED_APP")
         if (blockedApp != null) {
+            // Ellenőrizzük, hogy ne legyen duplikált hívás
             methodChannel?.invokeMethod("showWaitingScreen", blockedApp)
             intent.removeExtra("BLOCKED_APP")
         }
@@ -94,6 +114,8 @@ class MainActivity: FlutterActivity() {
     override fun onStop() {
         super.onStop()
         OverlayAccessibilityService.isIntercepting = false
+        // reseteljük a wasJustDismissed jelzőt, hogy később újra engedélyezett legyen a várakozó képernyő
+        wasJustDismissed = false
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
