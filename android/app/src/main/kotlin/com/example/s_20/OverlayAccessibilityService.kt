@@ -47,6 +47,15 @@ class OverlayAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString() ?: return
 
+        // Extra védelem: csak akkor reagáljunk, ha az app ténylegesen az aktív ablakban van.
+        // Ha például a felhasználó kilövi az appot swipe-pal, az rendszer ablakváltozást jelezhet,
+        // de a getRootInActiveWindow null vagy más csomag lehet — ilyenkor ne blokkoljunk.
+        val rootPkg = rootInActiveWindow?.packageName?.toString()
+        if (rootPkg == null || rootPkg != packageName) {
+            Log.d("DoomBreaker", "Ablakváltozás jött de nem az aktív root: eventPkg=$packageName rootPkg=$rootPkg, figyelmen kívül hagyva")
+            return
+        }
+
         // A Flutterből át is küldhetjük ezt a listát a jövőben, de egyelőre a UI-ban van szűrve
         if (blockedApps.contains(packageName)) {
             if (isCurrentlyAllowed(packageName)) {
@@ -69,7 +78,7 @@ class OverlayAccessibilityService : AccessibilityService() {
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP) 
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("BLOCKED_APP", blockedPackage)
         }
 
